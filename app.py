@@ -1,456 +1,400 @@
-import streamlit as st
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-import google.generativeai as genai
 import io
-import re
-import numpy as np
 
-# ==========================================
-# CONFIGURATION & BRANDING
-# ==========================================
-st.set_page_config(page_title="Financial Analytics & Vernimmen Plan", layout="wide")
+import streamlit as st
 
-COLORS = {
-    "dark_blue": "#00182b",
-    "blue_1": "#6e9fc8",
-    "blue_2": "#92c1ed",
-    "blue_3": "#c1ddf9",
-    "light_blue": "#f0f6fd",
-    "positive": "#72b043",
-    "negative": "#e12729",
-    "accent": "#f37324"
-}
+from lib.engine import AuditLog, ParseError, run as run_engine
+from lib.report import executive_summary, export_excel
+from lib.ai import generate_executive_summary, AIError, MODEL_CANDIDATES
+from lib import charts
 
-def inject_custom_css():
-    st.markdown("""
+st.set_page_config(
+    page_title="Financial Health Dashboard",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+NAVY = "#0b2540"
+ACCENT = "#f37324"
+POS = "#1a8a4a"
+NEG = "#c23b34"
+
+
+# ==============================================================================
+# STYLE
+# ==============================================================================
+def inject_css():
+    st.markdown(f"""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
-    /* Global typography */
-    html, body, [class*="css"] {
-        font-family: 'Inter', sans-serif !important;
-    }
+    html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; }}
 
-    /* Sidebar borders */
-    [data-testid="stSidebar"] {
-        border-right: 1px solid #1e3a5a;
-    }
-    
-    /* Code/Mono inputs */
-    input[type="password"], .stTextInput > div > div > input {
-        font-family: 'JetBrains Mono', monospace !important;
-        color: #c1ddf9 !important;
-        background-color: #00182b !important;
-        border: 1px solid #1e3a5a !important;
-    }
+    .stApp {{ background-color: #f6f8fb; }}
 
-    /* Metric/Card styling for dataframes */
-    [data-testid="stDataFrame"] > div {
-        background-color: #002b4d;
-        border: 1px solid #1e3a5a;
-        border-radius: 8px;
-    }
+    section[data-testid="stSidebar"] {{
+        background-color: #ffffff;
+        border-right: 1px solid #e6ecf3;
+    }}
 
-    /* Button styling */
-    .stButton > button {
-        background-color: #f37324;
-        color: white;
-        border: none;
-        border-radius: 4px;
-        font-weight: 600;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-    }
-    .stButton > button:hover {
-        background-color: #d9651f;
-        color: white;
-        border-color: #d9651f;
-    }
-    
-    /* Dividers */
-    hr {
-        border-color: #1e3a5a !important;
-    }
+    h1, h2, h3 {{ color: {NAVY}; font-weight: 700; }}
+
+    /* Hero header */
+    .app-hero {{
+        display: flex; justify-content: space-between; align-items: flex-end;
+        padding: 4px 0 18px 0; border-bottom: 1px solid #e2e9f2; margin-bottom: 22px;
+    }}
+    .app-hero h1 {{ margin: 0; font-size: 1.7rem; }}
+    .app-hero .sub {{ color: #64748b; font-size: 0.92rem; margin-top: 4px; }}
+    .app-hero .period {{
+        text-align: right; color: {NAVY}; font-size: 0.85rem; font-weight: 600;
+        background: white; padding: 8px 14px; border-radius: 8px; border: 1px solid #e2e9f2;
+    }}
+
+    /* KPI cards */
+    .kpi-row {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 22px; }}
+    .kpi-card {{
+        background: white; border-radius: 12px; padding: 16px 18px;
+        border: 1px solid #e6ecf3; box-shadow: 0 1px 2px rgba(11,37,64,0.04);
+    }}
+    .kpi-label {{ font-size: 0.78rem; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }}
+    .kpi-value {{ font-size: 1.65rem; font-weight: 800; color: {NAVY}; margin-top: 4px; }}
+    .kpi-delta {{ font-size: 0.8rem; font-weight: 700; margin-top: 6px; display: inline-block;
+                  padding: 2px 8px; border-radius: 999px; }}
+    .kpi-delta.up {{ color: {POS}; background: rgba(26,138,74,0.10); }}
+    .kpi-delta.down {{ color: {NEG}; background: rgba(194,59,52,0.10); }}
+    .kpi-delta.flat {{ color: #64748b; background: #f1f5f9; }}
+    .kpi-caption {{ font-size: 0.76rem; color: #94a3b8; margin-top: 6px; }}
+
+    /* Section headers */
+    .section-title {{
+        font-size: 1.15rem; font-weight: 700; color: {NAVY}; margin: 26px 0 4px 0;
+        display: flex; align-items: center; gap: 8px;
+    }}
+    .section-sub {{ color: #64748b; font-size: 0.86rem; margin-bottom: 14px; }}
+
+    /* Chart card wrapper */
+    div[data-testid="stPlotlyChart"] {{
+        background: white; border-radius: 12px; border: 1px solid #e6ecf3;
+        padding: 6px; box-shadow: 0 1px 2px rgba(11,37,64,0.04);
+    }}
+
+    /* AI summary box */
+    .ai-tag {{
+        font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+        color: {ACCENT};
+    }}
+    div[data-testid="stVerticalBlockBorderWrapper"] h4 {{ color: {NAVY}; margin-top: 14px; margin-bottom: 4px; font-size: 0.95rem; }}
+
+    .stButton > button, .stDownloadButton > button {{
+        background-color: {ACCENT}; color: white; border: none; border-radius: 6px;
+        font-weight: 600; padding: 0.5rem 1.1rem;
+    }}
+    .stButton > button:hover, .stDownloadButton > button:hover {{
+        background-color: #d9651f; color: white;
+    }}
+
+    .privacy-note {{
+        font-size: 0.78rem; color: #64748b; background: #f1f5f9; border-radius: 8px;
+        padding: 10px 12px; margin-top: 14px; line-height: 1.4;
+    }}
     </style>
     """, unsafe_allow_html=True)
 
-def apply_elegant_theme(fig):
-    fig.update_layout(
-        paper_bgcolor='#002b4d',
-        plot_bgcolor='#002b4d',
-        font=dict(color='#f0f6fd', family='Inter'),
-        title_font=dict(size=16, color='#c1ddf9', family='Inter'),
-        legend=dict(font=dict(color='#92c1ed')),
-        xaxis=dict(gridcolor='#1e3a5a', zerolinecolor='#1e3a5a', tickfont=dict(color='#6e9fc8')),
-        yaxis=dict(gridcolor='#1e3a5a', zerolinecolor='#1e3a5a', tickfont=dict(color='#6e9fc8')),
-        margin=dict(l=20, r=20, t=40, b=20)
-    )
-    return fig
 
-# ==========================================
-# DATA INGESTION & PROCESSING
-# ==========================================
-def clean_currency(val):
-    if pd.isna(val):
-        return 0.0
-    if isinstance(val, (int, float)):
-        return float(val)
-    val = str(val).replace('$', '').replace(',', '').strip()
-    if not val:
-        return 0.0
-    try:
-        return float(val)
-    except:
-        return 0.0
-
-def identify_and_parse(file):
-    # Read the first few lines to identify the report type
-    content = file.read().decode('utf-8')
-    lines = content.split('\n')
-    report_type = "Unknown"
-    for i in range(5):
-        if i < len(lines):
-            line = lines[i].lower()
-            if "profit and loss" in line:
-                report_type = "PL"
-                break
-            elif "balance sheet" in line:
-                report_type = "BS"
-                break
-            elif "cash flow" in line:
-                report_type = "CF"
-                break
-    
-    # Reset file pointer and parse
-    file.seek(0)
-    # Typically QuickBooks exports have metadata in first 4 rows
-    df = pd.read_csv(file, skiprows=4)
-    # The first column is usually the account name. We rename it for consistency.
-    df.rename(columns={df.columns[0]: 'Account'}, inplace=True)
-    df.dropna(subset=['Account'], inplace=True)
-    
-    # Remove 'Total' column if it exists
-    if 'Total' in df.columns:
-        df = df.drop(columns=['Total'])
-        
-    # Clean currency values
-    for col in df.columns[1:]:
-        df[col] = df[col].apply(clean_currency)
-        
-    return report_type, df
-
-def extract_metric(df, keywords):
-    for _, row in df.iterrows():
-        acct = str(row['Account']).lower()
-        if any(k in acct for k in keywords):
-            return row[1:].astype(float)
-    # Return zero series if not found
-    return pd.Series(0.0, index=df.columns[1:])
-
-# ==========================================
-# MAIN APP
-# ==========================================
-def main():
-    inject_custom_css()
-    st.title("Financial Analytics & Executive Summary")
-    st.markdown("Automated financial insights based on the Vernimmen Four-Stage Plan.")
-    
-    # Sidebar
-    st.sidebar.header("Data Upload")
-    uploaded_files = st.sidebar.file_uploader(
-        "Upload QuickBooks CSVs (P&L, Balance Sheet, Cash Flows)", 
-        type="csv", 
-        accept_multiple_files=True
-    )
-    
-    st.sidebar.header("AI Settings")
-    
-    if "GEMINI_API_KEY" in st.secrets:
-        api_key = st.secrets["GEMINI_API_KEY"]
+def kpi_card(label, value, delta_pct=None, caption=""):
+    # NOTE: this must be emitted as a single line with no leading whitespace.
+    # st.markdown() runs CommonMark first — a blank line followed by an
+    # indented line (as a pretty-printed multi-line f-string would produce
+    # once several cards are concatenated) is parsed as a *code block*, not
+    # passed through as HTML, so only the first card would render.
+    if delta_pct is None or delta_pct != delta_pct:  # NaN check
+        delta_html = ""
     else:
-        api_key = st.sidebar.text_input("Gemini API Key", type="password")
+        direction = "up" if delta_pct > 0.05 else ("down" if delta_pct < -0.05 else "flat")
+        arrow = "▲" if direction == "up" else ("▼" if direction == "down" else "▪")
+        delta_html = f'<div class="kpi-delta {direction}">{arrow} {abs(delta_pct):.1f}% vs prior month</div>'
+    return (f'<div class="kpi-card"><div class="kpi-label">{label}</div>'
+            f'<div class="kpi-value">{value}</div>{delta_html}'
+            f'<div class="kpi-caption">{caption}</div></div>')
 
-    if not uploaded_files or len(uploaded_files) < 3:
-        st.info("Please upload all three files (Profit & Loss, Balance Sheet, Statement of Cash Flows) to begin.")
+
+def money0(v):
+    if v != v:
+        return "n/a"
+    sign = "-" if v < 0 else ""
+    return f"{sign}${abs(v):,.0f}"
+
+
+# ==============================================================================
+# DATA PROCESSING (cached so UI interactions don't re-parse the CSVs)
+# ==============================================================================
+@st.cache_data(show_spinner=False)
+def process_files(file_bytes: dict):
+    audit = AuditLog()
+    files = {name: io.BytesIO(b) for name, b in file_bytes.items()}
+    try:
+        M, statements, entity = run_engine(files, audit)
+    except ParseError as e:
+        e.audit_entries = audit.entries
+        raise
+    return M, statements, entity, audit
+
+
+# ==============================================================================
+# SIDEBAR
+# ==============================================================================
+def sidebar():
+    st.sidebar.markdown(f"<h2 style='color:{NAVY};margin-bottom:0;'>📊 Benedetto</h2>", unsafe_allow_html=True)
+    st.sidebar.caption("Financial Health Dashboard · Vernimmen Framework")
+    st.sidebar.divider()
+
+    st.sidebar.subheader("1. Upload your financials")
+    uploaded = st.sidebar.file_uploader(
+        "QuickBooks CSV exports",
+        type="csv",
+        accept_multiple_files=True,
+        help="Upload all three: Profit & Loss, Balance Sheet, and Statement of Cash Flows. "
+             "File names don't matter — they're identified automatically by content.",
+    )
+    with st.sidebar.expander("Where do I get these from QuickBooks?"):
+        st.markdown(
+            "1. Go to **Reports** in QuickBooks Online.\n"
+            "2. Open **Profit and Loss**, **Balance Sheet**, and **Statement of Cash Flows**.\n"
+            "3. Set the same monthly date range on all three.\n"
+            "4. Click **Export → Export to CSV** on each, then upload all three here."
+        )
+
+    st.sidebar.subheader("2. AI executive summary")
+    try:
+        default_key = st.secrets["GEMINI_API_KEY"]
+    except (KeyError, FileNotFoundError):
+        default_key = ""
+    api_key = st.sidebar.text_input(
+        "Gemini API key", value="", type="password",
+        placeholder="Using saved key" if default_key else "Paste your Gemini API key",
+        help="Get a free key at aistudio.google.com/apikey. Stored only for this browser session.",
+    ) or default_key
+    model_override = ""
+    with st.sidebar.expander("Advanced AI settings"):
+        model_override = st.text_input(
+            "Model override (optional)", value="",
+            placeholder=f"default tries: {', '.join(MODEL_CANDIDATES)}",
+        )
+
+    st.sidebar.markdown(
+        '<div class="privacy-note">🔒 Nothing you upload is saved or written to a database — '
+        "the numbers are processed in memory for this session and vanish when you refresh or "
+        "close the tab. Your Gemini key is only used to call Google's API directly from this "
+        "session.</div>",
+        unsafe_allow_html=True,
+    )
+    return uploaded, api_key, model_override
+
+
+# ==============================================================================
+# MAIN
+# ==============================================================================
+def main():
+    inject_css()
+    uploaded, api_key, model_override = sidebar()
+
+    st.markdown(f"""
+    <div class="app-hero">
+        <div>
+            <h1>Financial Health Dashboard</h1>
+            <div class="sub">A plain-English read on how the business is really doing.</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if not uploaded or len(uploaded) < 3:
+        st.info(
+            "👋 Upload your **Profit & Loss**, **Balance Sheet**, and **Statement of Cash Flows** "
+            "CSV exports in the sidebar to get started. All three are needed — file names don't matter."
+        )
         st.stop()
-        
-    # Process files
-    reports = {}
-    for f in uploaded_files:
-        rtype, df = identify_and_parse(f)
-        reports[rtype] = df
-        
-    if "PL" not in reports or "BS" not in reports or "CF" not in reports:
-        st.error("Could not confidently identify one or more of the required reports (P&L, Balance Sheet, Cash Flow). Please check the file contents.")
-        return
-        
-    pl_df = reports["PL"]
-    bs_df = reports["BS"]
-    cf_df = reports["CF"]
-    
-    # Get common months
-    months = [col for col in pl_df.columns if col != 'Account']
-    
-    # --- Extract P&L Metrics ---
-    sales = extract_metric(pl_df, ['total for income', 'total income'])
-    cogs = extract_metric(pl_df, ['total for cost of goods sold', 'total cost of goods sold'])
-    gross_profit = extract_metric(pl_df, ['gross profit'])
-    expenses = extract_metric(pl_df, ['total for expenses', 'total expenses'])
-    net_income = extract_metric(pl_df, ['net income'])
-    
-    if gross_profit.sum() == 0:
-        gross_profit = sales - cogs
-        
-    # --- Extract BS Metrics ---
-    current_assets = extract_metric(bs_df, ['total for current assets', 'total current assets'])
-    inventory = extract_metric(bs_df, ['inventory asset', 'inventory'])
-    total_assets = extract_metric(bs_df, ['total for assets', 'total assets'])
-    current_liabilities = extract_metric(bs_df, ['total for current liabilities', 'total current liabilities'])
-    
-    working_capital = current_assets - current_liabilities
-    capital_employed = total_assets - current_liabilities
-    
-    current_ratio = current_assets / current_liabilities.replace(0, np.nan)
-    quick_ratio = (current_assets - inventory) / current_liabilities.replace(0, np.nan)
-    
-    # --- Extract CF Metrics ---
-    cf_operating = extract_metric(cf_df, ['net cash provided by operating activities'])
-    cf_investing = extract_metric(cf_df, ['net cash provided by investing activities'])
-    cf_financing = extract_metric(cf_df, ['net cash provided by financing activities'])
-    cf_net = extract_metric(cf_df, ['net cash increase for period'])
-    
-    # Construct combined metrics DataFrame
-    metrics_df = pd.DataFrame({
-        'Month': months,
-        'Sales': sales.values,
-        'COGS': cogs.values,
-        'Gross Profit': gross_profit.values,
-        'Expenses': expenses.values,
-        'Net Income': net_income.values,
-        'Current Assets': current_assets.values,
-        'Current Liabilities': current_liabilities.values,
-        'Working Capital': working_capital.values,
-        'Capital Employed': capital_employed.values,
-        'Current Ratio': current_ratio.values,
-        'Quick Ratio': quick_ratio.values,
-        'Operating CF': cf_operating.values,
-        'Investing CF': cf_investing.values,
-        'Financing CF': cf_financing.values,
-        'Net CF': cf_net.values
-    }).set_index('Month')
-    
-    st.subheader("Monthly Metrics Data")
-    st.dataframe(metrics_df.style.format("{:,.2f}"))
 
-    # ==========================================
-    # VISUALIZATIONS
-    # ==========================================
+    file_bytes = {f.name: f.getvalue() for f in uploaded}
+    try:
+        with st.spinner("Reading your financial statements…"):
+            M, statements, entity, audit = process_files(file_bytes)
+    except ParseError as e:
+        st.error(f"⚠️ {e}")
+        entries = getattr(e, "audit_entries", [])
+        if entries:
+            with st.expander("What we found while reading your files"):
+                for a in entries:
+                    icon = {"ERROR": "🔴", "WARNING": "🟡", "INFO": "🔵"}.get(a["Severity"], "•")
+                    st.markdown(f"{icon} **[{a['Area']}]** {a['Finding']}")
+        st.stop()
+
+    period = f"{M.index[0]} → {M.index[-1]}"
+    st.markdown(f"""
+    <div style="margin-top:-14px;margin-bottom:18px;">
+        <span style="font-weight:700;color:{NAVY};font-size:1.05rem;">{entity}</span>
+        <span style="color:#94a3b8;"> · {period} · {len(M.index)} months</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    errors = audit.errors()
+    if errors:
+        with st.expander(f"⚠️ {len(errors)} data quality issue(s) found — click to review", expanded=False):
+            for a in errors:
+                st.warning(f"**{a['Area']}:** {a['Finding']}")
+
+    # ---- KPI row ----
+    latest = M.index[-1]
+    sales_delta = M["Sales Growth %"].iloc[-1]
+    ni_series = M["Net Income"]
+    ni_delta = ((ni_series.iloc[-1] - ni_series.iloc[-2]) / abs(ni_series.iloc[-2]) * 100
+                if len(ni_series) > 1 and abs(ni_series.iloc[-2]) > 1e-9 else float("nan"))
+    cash_series = M["Cash"]
+    cash_delta = ((cash_series.iloc[-1] - cash_series.iloc[-2]) / abs(cash_series.iloc[-2]) * 100
+                  if len(cash_series) > 1 and abs(cash_series.iloc[-2]) > 1e-9 else float("nan"))
+    ocf_series = M["Operating Cash Flow"]
+    ocf_delta = ((ocf_series.iloc[-1] - ocf_series.iloc[-2]) / abs(ocf_series.iloc[-2]) * 100
+                 if len(ocf_series) > 1 and abs(ocf_series.iloc[-2]) > 1e-9 else float("nan"))
+
+    st.markdown('<div class="kpi-row">' + "".join([
+        kpi_card("Revenue", money0(M["Sales"].iloc[-1]), sales_delta, f"Money brought in during {latest}"),
+        kpi_card("Profit", money0(M["Net Income"].iloc[-1]), ni_delta, f"What's left after all costs in {latest}"),
+        kpi_card("Cash on Hand", money0(M["Cash"].iloc[-1]), cash_delta, "Cash sitting in the bank right now"),
+        kpi_card("Cash From Operations", money0(M["Operating Cash Flow"].iloc[-1]), ocf_delta,
+                  "Cash actually generated by running the business"),
+    ]) + '</div>', unsafe_allow_html=True)
+
+    view = st.radio("View", ["Simple", "Detailed"], horizontal=True, label_visibility="collapsed")
+
+    if view == "Simple":
+        render_simple(M)
+    else:
+        render_detailed(M, statements, entity, audit)
+
+    render_ai_section(M, entity, audit, api_key, model_override)
+
     st.divider()
-    st.header("Financial Visualizations")
-    
-    col1, col2 = st.columns(2)
-    
-    # 1. Liquidity Gauges (Latest Month)
-    with col1:
-        latest_cr = metrics_df['Current Ratio'].iloc[-1]
-        latest_qr = metrics_df['Quick Ratio'].iloc[-1]
-        
-        fig_gauge = go.Figure()
-        fig_gauge.add_trace(go.Indicator(
-            mode = "gauge+number",
-            value = latest_cr,
-            title = {'text': "Current Ratio (Latest)"},
-            domain = {'x': [0, 0.45], 'y': [0, 1]},
-            gauge = {'axis': {'range': [0, 3]},
-                     'bar': {'color': COLORS['dark_blue']}}
-        ))
-        fig_gauge.add_trace(go.Indicator(
-            mode = "gauge+number",
-            value = latest_qr,
-            title = {'text': "Quick Ratio (Latest)"},
-            domain = {'x': [0.55, 1], 'y': [0, 1]},
-            gauge = {'axis': {'range': [0, 3]},
-                     'bar': {'color': COLORS['blue_1']}}
-        ))
-        fig_gauge.update_layout(height=300, margin=dict(l=20, r=20, t=30, b=20))
-        fig_gauge = apply_elegant_theme(fig_gauge)
-        st.plotly_chart(fig_gauge, use_container_width=True)
+    st.caption("Benedetto LLC · Built on the Vernimmen four-stage financial framework "
+               "(Wealth Creation → Investment → Financing → Returns).")
 
-    # 2. Area Chart for MoM Sales vs Net Income
-    with col2:
-        fig_area = px.area(
-            metrics_df, 
-            y=['Sales', 'Net Income'], 
-            color_discrete_sequence=[COLORS['blue_1'], COLORS['dark_blue']],
-            title="Sales vs Net Income (MoM)"
-        )
-        fig_area = apply_elegant_theme(fig_area)
-        st.plotly_chart(fig_area, use_container_width=True)
-        
-    col3, col4 = st.columns(2)
-    
-    # 3. Line Chart for MoM Common-Size Analysis
-    with col3:
-        cs_df = pd.DataFrame(index=metrics_df.index)
-        cs_df['COGS %'] = metrics_df['COGS'] / metrics_df['Sales'].replace(0, np.nan) * 100
-        cs_df['Expenses %'] = metrics_df['Expenses'] / metrics_df['Sales'].replace(0, np.nan) * 100
-        cs_df['Net Income %'] = metrics_df['Net Income'] / metrics_df['Sales'].replace(0, np.nan) * 100
-        
-        fig_cs = px.line(
-            cs_df, 
-            y=['COGS %', 'Expenses %', 'Net Income %'],
-            color_discrete_sequence=[COLORS['accent'], COLORS['negative'], COLORS['positive']],
-            title="Common-Size Analysis (% of Sales)"
-        )
-        fig_cs = apply_elegant_theme(fig_cs)
-        st.plotly_chart(fig_cs, use_container_width=True)
-        
-    # 4. Stacked Bar Chart for MoM Variance %
-    with col4:
-        var_df = metrics_df[['Sales', 'Expenses', 'Net Income']].pct_change() * 100
-        # Replace infs and drop first NA row
-        var_df = var_df.replace([np.inf, -np.inf], np.nan).dropna()
-        
-        fig_var = px.bar(
-            var_df,
-            barmode='relative',
-            color_discrete_sequence=[COLORS['blue_2'], COLORS['negative'], COLORS['positive']],
-            title="MoM Variance % (Sales, Expenses, Net Income)"
-        )
-        fig_var = apply_elegant_theme(fig_var)
-        st.plotly_chart(fig_var, use_container_width=True)
 
-    col5, col6 = st.columns(2)
-    
-    # 5. Waterfall Chart for Cash Flow Allocation
-    with col5:
-        # Sum CF across the period
-        cf_totals = [
-            metrics_df['Operating CF'].sum(),
-            metrics_df['Investing CF'].sum(),
-            metrics_df['Financing CF'].sum()
-        ]
-        
-        fig_waterfall = go.Figure(go.Waterfall(
-            name = "Cash Flow",
-            orientation = "v",
-            measure = ["relative", "relative", "relative", "total"],
-            x = ["Operating", "Investing", "Financing", "Net Change"],
-            y = cf_totals + [sum(cf_totals)],
-            connector = {"line":{"color":"rgb(63, 63, 63)"}},
-            decreasing = {"marker":{"color":COLORS['negative']}},
-            increasing = {"marker":{"color":COLORS['positive']}},
-            totals = {"marker":{"color":COLORS['dark_blue']}}
-        ))
-        fig_waterfall.update_layout(title="Cash Flow Allocation (Period Total)", showlegend=False)
-        fig_waterfall = apply_elegant_theme(fig_waterfall)
-        st.plotly_chart(fig_waterfall, use_container_width=True)
-        
-    # 6. Dual-Axis Chart for Capital Employed vs Working Capital
-    with col6:
-        fig_dual = go.Figure()
-        fig_dual.add_trace(go.Bar(
-            x=metrics_df.index,
-            y=metrics_df['Capital Employed'],
-            name='Capital Employed',
-            marker_color=COLORS['blue_3']
-        ))
-        fig_dual.add_trace(go.Scatter(
-            x=metrics_df.index,
-            y=metrics_df['Working Capital'],
-            name='Working Capital',
-            mode='lines+markers',
-            line=dict(color=COLORS['accent'], width=3),
-            yaxis='y2'
-        ))
-        fig_dual.update_layout(
-            title="Capital Employed vs Working Capital",
-            yaxis=dict(title="Capital Employed"),
-            yaxis2=dict(title="Working Capital", overlaying='y', side='right'),
-            barmode='group'
-        )
-        fig_dual = apply_elegant_theme(fig_dual)
-        st.plotly_chart(fig_dual, use_container_width=True)
-        
-    # 7. Bridge/Walk Chart for "Scissors Effect" (Price/Volume vs Cost)
-    # Using Sales Growth vs Expense Growth to illustrate margin changes
-    st.subheader("Scissors Effect: Margin Walk (Total Period)")
-    sales_growth = metrics_df['Sales'].iloc[-1] - metrics_df['Sales'].iloc[0]
-    cogs_growth = metrics_df['COGS'].iloc[-1] - metrics_df['COGS'].iloc[0]
-    exp_growth = metrics_df['Expenses'].iloc[-1] - metrics_df['Expenses'].iloc[0]
-    net_growth = metrics_df['Net Income'].iloc[-1] - metrics_df['Net Income'].iloc[0]
-    
-    fig_bridge = go.Figure(go.Waterfall(
-        orientation="v",
-        measure=["absolute", "relative", "relative", "total"],
-        x=["Starting Net Income", "Sales Growth (Volume/Price)", "Cost Growth (COGS + Opex)", "Ending Net Income"],
-        y=[metrics_df['Net Income'].iloc[0], sales_growth, -(cogs_growth + exp_growth), metrics_df['Net Income'].iloc[-1]],
-        decreasing={"marker":{"color":COLORS['negative']}},
-        increasing={"marker":{"color":COLORS['positive']}},
-        totals={"marker":{"color":COLORS['dark_blue']}}
-    ))
-    fig_bridge.update_layout(title="Scissors Effect Analysis")
-    fig_bridge = apply_elegant_theme(fig_bridge)
-    st.plotly_chart(fig_bridge, use_container_width=True)
-    
-    # ==========================================
-    # AI EXECUTIVE SUMMARY
-    # ==========================================
-    st.divider()
-    st.header("AI Executive Summary")
-    
-    if st.button("Generate Executive Summary"):
-        if not api_key:
-            st.error("Please enter your Gemini API Key in the sidebar.")
+def render_simple(M):
+    st.plotly_chart(charts.simple_health_meters(M), width='stretch', config={"displayModeBar": False})
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.plotly_chart(charts.simple_revenue_profit(M), width='stretch', config={"displayModeBar": False})
+    with c2:
+        st.plotly_chart(charts.simple_cash_trend(M), width='stretch', config={"displayModeBar": False})
+
+    st.plotly_chart(charts.simple_revenue_bridge(M), width='stretch', config={"displayModeBar": False})
+
+
+def render_detailed(M, statements, entity, audit):
+    st.markdown('<div class="section-title">Executive Summary</div>', unsafe_allow_html=True)
+    summ = executive_summary(M, entity)
+    st.dataframe(summ, hide_index=True, width='stretch')
+
+    xlsx = export_excel(M, entity, statements, audit)
+    st.download_button("⬇ Download full Excel report", data=xlsx,
+                        file_name=f"{entity.replace(' ', '_')}_Financial_Report.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    tabs = st.tabs(["1 · Wealth Creation", "2 · Investment Policy", "3 · Financing Policy",
+                     "4 · Returns", "Data Quality & Mapping"])
+
+    with tabs[0]:
+        st.caption("How much money the business makes, and whether revenue is growing faster than costs.")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.plotly_chart(charts.detail_revenue_momentum(M), width='stretch', config={"displayModeBar": False})
+        with c2:
+            st.plotly_chart(charts.detail_scissors(M), width='stretch', config={"displayModeBar": False})
+        c3, c4 = st.columns(2)
+        with c3:
+            st.plotly_chart(charts.detail_common_size(M), width='stretch', config={"displayModeBar": False})
+        with c4:
+            st.plotly_chart(charts.detail_variance(M), width='stretch', config={"displayModeBar": False})
+        st.plotly_chart(charts.detail_margin_walk(M), width='stretch', config={"displayModeBar": False})
+
+    with tabs[1]:
+        st.caption("What the business owns, what it owes short-term, and how efficiently cash cycles through operations.")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.plotly_chart(charts.detail_capital_employed(M), width='stretch', config={"displayModeBar": False})
+        with c2:
+            st.plotly_chart(charts.detail_working_capital(M), width='stretch', config={"displayModeBar": False})
+        st.plotly_chart(charts.detail_cash_conversion_cycle(M), width='stretch', config={"displayModeBar": False})
+        st.plotly_chart(charts.detail_capex_da(M), width='stretch', config={"displayModeBar": False})
+
+    with tabs[2]:
+        st.caption("How the business is funded — debt, cash, and where cash flow ultimately goes.")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.plotly_chart(charts.detail_net_debt(M), width='stretch', config={"displayModeBar": False})
+        with c2:
+            st.plotly_chart(charts.detail_leverage(M), width='stretch', config={"displayModeBar": False})
+        st.plotly_chart(charts.detail_operating_cf(M), width='stretch', config={"displayModeBar": False})
+        st.plotly_chart(charts.detail_cf_allocation(M), width='stretch', config={"displayModeBar": False})
+
+    with tabs[3]:
+        st.caption("Whether the business is generating good returns on the money invested in it, and whether debt is helping or hurting.")
+        st.plotly_chart(charts.detail_returns(M), width='stretch', config={"displayModeBar": False})
+
+    with tabs[4]:
+        st.markdown("**Data quality flags**")
+        if audit.entries:
+            for a in audit.entries:
+                icon = {"ERROR": "🔴", "WARNING": "🟡", "INFO": "🔵"}.get(a["Severity"], "•")
+                st.markdown(f"{icon} **[{a['Area']}]** {a['Finding']}")
         else:
-            with st.spinner("Analyzing financial data & generating insights..."):
+            st.success("No issues found.")
+        st.markdown("**Line-item mapping** — which line in your file each figure came from")
+        for kind, label in [("PL", "Profit & Loss"), ("BS", "Balance Sheet"), ("CF", "Statement of Cash Flows")]:
+            if kind in statements:
+                st.caption(label)
+                mapping = statements[kind].resolved
+                st.table({"Concept": list(mapping.keys()), "Matched line": list(mapping.values())})
+
+
+def render_ai_section(M, entity, audit, api_key, model_override):
+    st.markdown('<div class="section-title">🤖 AI Executive Summary</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-sub">A plain-English narrative generated by Google Gemini, grounded only in the figures above.</div>',
+                unsafe_allow_html=True)
+
+    cache_key = (entity, tuple(M.index), round(float(M["Sales"].sum()), 2))
+    if st.session_state.get("ai_summary_key") != cache_key:
+        st.session_state.pop("ai_summary_text", None)
+
+    col1, col2 = st.columns([1, 5])
+    with col1:
+        generate = st.button("✨ Generate summary")
+    if generate:
+        if not api_key:
+            st.error("Add your Gemini API key in the sidebar first.")
+        else:
+            with st.spinner("Analyzing the numbers…"):
                 try:
-                    # Initialize Gemini
-                    genai.configure(api_key=api_key)
-                    # Use standard models as per instructions
-                    model = genai.GenerativeModel('gemini-1.5-pro')
-                    
-                    # Compute key inputs for the prompt
-                    sales_pct = metrics_df['Sales'].pct_change().mean() * 100
-                    avg_net_margin = (metrics_df['Net Income'].sum() / metrics_df['Sales'].sum()) * 100
-                    trend_breaks = var_df[var_df.abs() > 10].dropna(how='all')
-                    
-                    prompt = f"""
-                    You are a Senior Financial Analyst presenting to firm partners.
-                    Based on the following month-over-month financial metrics, write a 3-paragraph executive summary based on the Vernimmen Four-Stage Plan.
-                    
-                    Data Summary:
-                    - Average MoM Sales Growth: {sales_pct:.2f}%
-                    - Overall Net Profit Margin: {avg_net_margin:.2f}%
-                    - Latest Current Ratio: {latest_cr:.2f}
-                    - Total Operating Cash Flow: ${cf_totals[0]:,.2f}
-                    - Total Cash Flow Net Change: ${sum(cf_totals):,.2f}
-                    
-                    Major Trend Breaks (>10% variance):
-                    {trend_breaks.to_string()}
-                    
-                    Requirements:
-                    - Exactly 3 paragraphs.
-                    - Highlight critical trend breaks.
-                    - Keep the tone professional, objective, and analytical.
-                    """
-                    
-                    response = model.generate_content(prompt)
-                    st.success("Summary Generated!")
-                    st.markdown(f"""
-                    <div style="background-color: #001f38; border-left: 4px solid #3b82f6; padding: 20px; border-radius: 4px; margin-top: 10px;">
-                        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-                            <span style="font-size: 12px; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; color: #93c5fd;">AI Executive Summary</span>
-                        </div>
-                        <div style="font-size: 14px; line-height: 1.6; color: #eff6ff; font-weight: 300; font-style: italic;">
-                            {response.text}
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                except Exception as e:
-                    st.error(f"Error generating summary: {str(e)}")
+                    text, model_used = generate_executive_summary(
+                        api_key, M, entity, audit.entries, model_override=model_override.strip()
+                    )
+                    st.session_state["ai_summary_text"] = text
+                    st.session_state["ai_summary_model"] = model_used
+                    st.session_state["ai_summary_key"] = cache_key
+                except AIError as e:
+                    st.error(f"Couldn't generate a summary: {e.friendly}")
+                    if e.technical and e.technical != e.friendly:
+                        with st.expander("Technical details"):
+                            st.code(e.technical)
+
+    if st.session_state.get("ai_summary_text") and st.session_state.get("ai_summary_key") == cache_key:
+        with st.container(border=True):
+            st.markdown(
+                f'<span class="ai-tag">✨ Generated by {st.session_state.get("ai_summary_model", "Gemini")}</span>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(st.session_state["ai_summary_text"])
+
 
 if __name__ == "__main__":
     main()
