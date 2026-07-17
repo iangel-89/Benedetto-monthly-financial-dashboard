@@ -166,11 +166,15 @@ def main():
     )
     
     st.sidebar.header("AI Settings")
-    api_key = st.sidebar.text_input("Gemini API Key", type="password")
     
-    if not uploaded_files or len(uploaded_files) < 3:
-        st.info("Please upload all three files (Profit & Loss, Balance Sheet, Statement of Cash Flows) to begin.")
-        return
+    if "GEMINI_API_KEY" in st.secrets:
+    api_key = st.secrets["GEMINI_API_KEY"]
+else:
+    api_key = st.sidebar.text_input("Gemini API Key", type="password")
+
+if not uploaded_files or len(uploaded_files) < 3:
+    st.info("Please upload all three files (Profit & Loss, Balance Sheet, Statement of Cash Flows) to begin.")
+    return
         
     # Process files
     reports = {}
