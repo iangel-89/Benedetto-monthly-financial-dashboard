@@ -314,16 +314,25 @@ def render_take_home(M, statements, entity, audit, api_key, model_override):
                 'section, dashboard-quality charts, and (if a Gemini key is set) the AI summary.</div>',
                 unsafe_allow_html=True)
 
-    col1, col2 = st.columns([1, 2])
+    if not st.session_state.get("show_export_options"):
+        if not st.button("📥 Export to Excel"):
+            return
+        st.session_state["show_export_options"] = True
+
+    col1, col2 = st.columns([1, 1])
     with col1:
         export_view = st.radio(
             "Report version", ["Simple", "Detailed"], horizontal=True, key="export_view_choice",
+            label_visibility="collapsed",
             help="Simple: plain-language charts only. Detailed: full Vernimmen breakdown per section. "
                  "Independent of the dashboard view below — pick whichever suits who you're handing this to.",
         )
+    with col2:
+        build_clicked = st.button("🧾 Build Excel report")
+
     xlsx_key = (ai_key, export_view)
 
-    if st.button("🧾 Build Excel report"):
+    if build_clicked:
         with st.spinner("Building your report…"):
             ai_text = ai_model = note = None
             if st.session_state.get("ai_summary_key") == ai_key and st.session_state.get("ai_summary_text"):
