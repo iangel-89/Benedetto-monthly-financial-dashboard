@@ -104,39 +104,31 @@ STAGE_MAP = {
 }
 
 
-# Native Excel charts per section sheet — each mirrors a dashboard chart.
-# (kind, chart title, [metric rows to plot]). Kept single-axis on purpose:
-# a chart mixing dollars and a ratio on two scales invents a correlation that
-# isn't in the data (same reason the on-screen charts avoid dual axes).
-CHART_SPECS = {
-    "Wealth Creation": [
-        ("bar", "Revenue vs. Net income ($)", ["Sales", "Net Income"]),
-        ("line", "Profit margins (% of revenue)",
-         ["Gross Margin %", "EBITDA Margin %", "EBIT Margin %", "Net Margin %"]),
-    ],
-    "Investment Policy": [
-        ("bar", "Capital employed ($)", ["Capital Employed"]),
-        ("line", "Cash conversion cycle (days)",
-         ["DSO (days)", "DIO (days)", "DPO (days)", "Cash Conversion Cycle (days)"]),
-        ("line", "Liquidity ratios (x)", ["Current Ratio", "Quick Ratio"]),
-    ],
-    "Financing Policy": [
-        ("bar", "Net debt ($)", ["Net Debt"]),
-        ("bar", "Operating cash flow ($)", ["Operating Cash Flow"]),
-        ("line", "Net debt / EBITDA (x)", ["Net Debt / EBITDA (x)"]),
-    ],
-    "Returns & Leverage": [
-        ("bar", "ROCE vs. ROE (%)", ["ROCE %", "ROE %"]),
-        ("line", "Return vs. cost of debt (%)", ["ROCE %", "After-tax Cost of Debt %"]),
-    ],
+# Chart images embedded per sheet — each is a PNG render of the exact same
+# Plotly figure shown on the dashboard (via lib.charts + kaleido), so the
+# take-home report matches what was actually reviewed on screen instead of a
+# separately-styled native Excel chart. Detailed mode places the full
+# Vernimmen-stage breakdown on each stage sheet; Simple mode places the four
+# plain-language charts on the Executive Summary sheet only, leaving the
+# stage sheets (which use Vernimmen terminology) as data tables only.
+DETAIL_CHART_FUNCS = {
+    "Wealth Creation": ["detail_revenue_momentum", "detail_scissors", "detail_common_size",
+                         "detail_variance", "detail_margin_walk"],
+    "Investment Policy": ["detail_capital_employed", "detail_working_capital",
+                           "detail_cash_conversion_cycle", "detail_capex_da"],
+    "Financing Policy": ["detail_net_debt", "detail_leverage", "detail_operating_cf",
+                          "detail_cf_allocation"],
+    "Returns & Leverage": ["detail_returns"],
 }
+SIMPLE_CHART_FUNCS = ["simple_health_meters", "simple_revenue_profit",
+                       "simple_cash_trend", "simple_revenue_bridge"]
 
 
 def _fmt_generated() -> str:
     return dt.datetime.now().strftime("%B %d, %Y")
 
 
-def _write_cover(ws, entity: str, M: pd.DataFrame, has_ai: bool):
+def _write_cover(ws, entity: str, M: pd.DataFrame, has_ai: bool, view: str = "detailed"):
     from openpyxl.styles import Font, Alignment
 
     ws.sheet_view.showGridLines = False
@@ -154,6 +146,10 @@ def _write_cover(ws, entity: str, M: pd.DataFrame, has_ai: bool):
     ws["B7"].font = Font(size=11, color="52514E")
     ws["B8"] = f"Report generated:  {_fmt_generated()}"
     ws["B8"].font = Font(size=11, color="52514E")
+    version_label = ("Simple — plain-language summary" if view == "simple"
+                      else "Detailed — full Vernimmen breakdown")
+    ws["B9"] = f"Report version:  {version_label}"
+    ws["B9"].font = Font(size=11, color="52514E")
 
     ws["B11"] = "Contents"
     ws["B11"].font = Font(bold=True, size=13, color="0B2540")
@@ -216,54 +212,66 @@ def _write_ai_sheet(ws, ai_summary: str, ai_model: str, entity: str):
         r += 1
 
 
-def _add_section_charts(ws, cols: list, n_months: int, specs: list):
-    """Add native (editable) Excel charts below the transposed data table.
+def _fig_to_png(fig, width: int = 860, scale: int = 2) -> bytes:
+    """Render a Plotly figure to PNG bytes at its own configured aspect ratio
+    (brand_layout sets height; width defaults to Plotly's standard 700px
+    unless overridden here), scaled 2x for a crisp look at Excel's display size."""
+    height = fig.layout.height or 420
+    return fig.to_image(format="png", width=width, height=height, scale=scale)
 
-    The data was written with `M[cols].T.to_excel`, so row 1 is the month
-    header and metric `cols[i]` sits on row i+2, with col A holding its name
-    (used as the series title) and cols B..(1+n_months) holding the values.
-    """
-    from openpyxl.chart import BarChart, LineChart, Reference
 
-    def metric_row(name):
-        return cols.index(name) + 2 if name in cols else None
+def _embed_chart_images(ws, anchor_row: int, figs: list, full_width_first: bool = False):
+    """Place PNG renders of the given Plotly figures below anchor_row: two per
+    row in a grid, or — when full_width_first is set — the first figure alone
+    spanning a full row (used for the wide health-meters gauge trio)."""
+    from openpyxl.drawing.image import Image as XLImage
 
-    cats = Reference(ws, min_col=2, max_col=1 + n_months, min_row=1, max_row=1)
-    anchor_row = len(cols) + 4
-    for i, (kind, title, metrics) in enumerate(specs):
-        rows = [metric_row(m) for m in metrics]
-        rows = [r for r in rows if r is not None]
-        if not rows:
-            continue
-        chart = BarChart() if kind == "bar" else LineChart()
-        if kind == "bar":
-            chart.type = "col"
-            chart.gapWidth = 60
-        chart.title = title
-        chart.height = 7.5
-        chart.width = 17
-        chart.style = 2
-        for r in rows:
-            ref = Reference(ws, min_col=1, max_col=1 + n_months, min_row=r, max_row=r)
-            chart.add_data(ref, from_rows=True, titles_from_data=True)
-        chart.set_categories(cats)
-        chart.y_axis.majorGridlines = None
-        # Two charts per row of the sheet grid, then wrap.
-        col_letter = "B" if i % 2 == 0 else "M"
-        row_num = anchor_row + (i // 2) * 16
-        ws.add_chart(chart, f"{col_letter}{row_num}")
+    RENDER_W = 860
+    HALF_DISP_W, HALF_STEP = 430, 17
+    FULL_DISP_W, FULL_STEP = 890, 15
+
+    row = anchor_row
+    start = 0
+    if full_width_first and figs:
+        fig = figs[0]
+        png = _fig_to_png(fig, width=RENDER_W * 2)
+        img = XLImage(io.BytesIO(png))
+        img.width = FULL_DISP_W
+        img.height = int((fig.layout.height or 420) * FULL_DISP_W / (RENDER_W * 2))
+        ws.add_image(img, f"B{row}")
+        row += FULL_STEP
+        start = 1
+
+    col_letters = ["B", "L"]
+    for i, fig in enumerate(figs[start:]):
+        png = _fig_to_png(fig, width=RENDER_W)
+        img = XLImage(io.BytesIO(png))
+        img.width = HALF_DISP_W
+        img.height = int((fig.layout.height or 420) * HALF_DISP_W / RENDER_W)
+        col = col_letters[i % 2]
+        r = row + (i // 2) * HALF_STEP
+        ws.add_image(img, f"{col}{r}")
 
 
 def export_excel(M: pd.DataFrame, entity: str, statements: dict, audit,
-                 ai_summary: str | None = None, ai_model: str | None = None) -> bytes:
+                 ai_summary: str | None = None, ai_model: str | None = None,
+                 view: str = "detailed") -> bytes:
     """Build the take-home workbook in memory — no filesystem writes, so this
     works unmodified on Streamlit Cloud.
 
     Sheet order mirrors the dashboard: Cover, (AI Summary), Executive Summary,
-    the four Vernimmen stage sheets (each with native Excel charts), then the
-    Data Quality Log and Line Item Mapping. The AI Summary sheet is included
-    only when `ai_summary` is provided.
+    the four Vernimmen stage sheets, then the Data Quality Log and Line Item
+    Mapping. Every sheet keeps its full data table regardless of `view`; what
+    changes is which chart images (PNG renders of the actual dashboard
+    Plotly charts) get embedded:
+      - "detailed": the full Vernimmen-stage breakdown charts, one set per
+        stage sheet — matches the dashboard's Detailed tabs.
+      - "simple": the four plain-language charts on the Executive Summary
+        sheet only; stage sheets stay tables-only, matching the dashboard's
+        Simple view (which has no per-stage chart breakdown either).
+    The AI Summary sheet is included only when `ai_summary` is provided.
     """
+    view = "simple" if str(view).lower().startswith("simple") else "detailed"
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
@@ -332,16 +340,28 @@ def export_excel(M: pd.DataFrame, entity: str, statements: dict, audit,
                 cc.fill = pale
                 cc.font = Font(bold=True, color="00182B", size=11)
 
-    # Native charts on each stage sheet.
-    n_months = len(M.index)
-    for tab, specs in CHART_SPECS.items():
-        if tab in wb.sheetnames:
-            _add_section_charts(wb[tab], section_cols.get(tab, []), n_months, specs)
+    # Chart images: same Plotly figures as the dashboard, rendered to PNG.
+    # Lazy import avoids a circular import (lib.charts imports money/pct from
+    # this module).
+    from . import charts as _charts
+
+    if view == "detailed":
+        for tab, fn_names in DETAIL_CHART_FUNCS.items():
+            if tab not in wb.sheetnames:
+                continue
+            cols = section_cols.get(tab, [])
+            figs = [getattr(_charts, fn)(M) for fn in fn_names]
+            anchor_row = len(cols) + 4
+            _embed_chart_images(wb[tab], anchor_row, figs)
+    else:
+        figs = [getattr(_charts, fn)(M) for fn in SIMPLE_CHART_FUNCS]
+        anchor_row = len(summ) + 4
+        _embed_chart_images(wb["Executive Summary"], anchor_row, figs, full_width_first=True)
 
     # Cover sheet first; AI summary sheet second (when present).
     has_ai = bool(ai_summary and ai_summary.strip())
     cover = wb.create_sheet("Cover", 0)
-    _write_cover(cover, entity, M, has_ai)
+    _write_cover(cover, entity, M, has_ai, view)
     if has_ai:
         ai_ws = wb.create_sheet("AI Summary", 1)
         _write_ai_sheet(ai_ws, ai_summary, ai_model or "", entity)
