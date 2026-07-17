@@ -145,8 +145,8 @@ def process_files(file_bytes: dict):
 # SIDEBAR
 # ==============================================================================
 def sidebar():
-    st.sidebar.markdown(f"<h2 style='color:{NAVY};margin-bottom:0;'>📊 Benedetto</h2>", unsafe_allow_html=True)
-    st.sidebar.caption("Financial Health Dashboard · Vernimmen Framework")
+    st.sidebar.markdown(f"<h2 style='color:{NAVY};margin-bottom:0;'>📊 Sky & Aarons</h2>", unsafe_allow_html=True)
+    st.sidebar.caption("Financial Health Dashboard")
     st.sidebar.divider()
 
     st.sidebar.subheader("1. Upload your financials")
@@ -274,7 +274,7 @@ def main():
     render_ai_section(M, entity, audit, api_key, model_override)
 
     st.divider()
-    st.caption("Benedetto LLC · Built on the Vernimmen four-stage financial framework "
+    st.caption("Sky & Aarons Accountancy LLP · Built on the Vernimmen four-stage financial framework "
                "(Wealth Creation → Investment → Financing → Returns).")
 
 
